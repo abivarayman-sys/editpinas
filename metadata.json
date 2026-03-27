@@ -1,0 +1,7 @@
+{
+  "name": "SnapStyle Multi-Tenant AI",
+  "description": "A multi-tenant AI photography SaaS platform with custom branding, credit systems, and Gemini-powered image generation.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

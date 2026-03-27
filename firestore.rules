@@ -1,0 +1,177 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() { return request.auth != null; }
+    function isSuperAdmin() {
+      // In a real app, use custom claims or a dedicated admins collection.
+      // For this prototype, we'll use the user's email.
+      return isAuthenticated() && request.auth.token.email == "abivarayman@gmail.com";
+    }
+    function isResellerOwner(resellerId) {
+      // Check if the user is the owner of the reseller document
+      return isAuthenticated() && request.auth.uid == get(/databases/$(database)/documents/resellers/$(resellerId)).data.ownerUid;
+    }
+    
+    // Validate string length
+    function validStringLength(field, minLen, maxLen) {
+       return request.resource.data[field] is string &&
+         request.resource.data[field].size() >= minLen &&
+         request.resource.data[field].size() <= maxLen;
+    }
+
+    // Validate URL format (must start with https:// or http://)
+    function isValidUrl(url) {
+       return url is string &&
+         (url.matches("^https://.*") || url.matches("^http://.*"));
+    }
+
+    // Validate email format
+    function isValidEmail(email) {
+       return email is string &&
+         email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+    
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+    
+    function isValidReseller() {
+      return request.resource.data.brandName is string && request.resource.data.brandName.size() > 0 && request.resource.data.brandName.size() < 100 &&
+             request.resource.data.subdomain is string && request.resource.data.subdomain.size() > 0 && request.resource.data.subdomain.size() < 50 &&
+             request.resource.data.creditsBalance is number && request.resource.data.creditsBalance >= 0 &&
+             request.resource.data.maintenanceMode is bool &&
+             request.resource.data.ownerUid is string && request.resource.data.ownerUid.size() > 0 &&
+             (!('gcashNumber' in request.resource.data) || (request.resource.data.gcashNumber is string && request.resource.data.gcashNumber.size() < 20)) &&
+             (!('priceSingle' in request.resource.data) || (request.resource.data.priceSingle is number && request.resource.data.priceSingle >= 0)) &&
+             (!('creditsSingle' in request.resource.data) || (request.resource.data.creditsSingle is number && request.resource.data.creditsSingle >= 0)) &&
+             (!('currentOverlayUrl' in request.resource.data) || (request.resource.data.currentOverlayUrl is string && request.resource.data.currentOverlayUrl.size() < 1000));
+    }
+
+    function isValidPreset() {
+      return request.resource.data.styleName is string && request.resource.data.styleName.size() > 0 && request.resource.data.styleName.size() < 100 &&
+             request.resource.data.category is string && request.resource.data.category.size() > 0 && request.resource.data.category.size() < 50 &&
+             request.resource.data.promptFragment is string && request.resource.data.promptFragment.size() > 0 && request.resource.data.promptFragment.size() < 2000 &&
+             request.resource.data.thumbnailBase64 is string && request.resource.data.thumbnailBase64.size() > 0 && request.resource.data.thumbnailBase64.size() < 500000; // 500KB limit
+    }
+
+    function isValidUser() {
+      return request.resource.data.uid is string && request.resource.data.uid == request.auth.uid &&
+             request.resource.data.email is string && isValidEmail(request.resource.data.email) &&
+             request.resource.data.displayName is string && request.resource.data.displayName.size() > 0 && request.resource.data.displayName.size() < 100 &&
+             request.resource.data.credits is number && request.resource.data.credits >= 0 &&
+             request.resource.data.status in ['verified', 'banned'] &&
+             request.resource.data.totalCreditPurchased is number && request.resource.data.totalCreditPurchased >= 0 &&
+             request.resource.data.photosGenerated is number && request.resource.data.photosGenerated >= 0;
+    }
+
+    function isValidTransaction() {
+      return request.resource.data.userId is string && request.resource.data.userId == request.auth.uid &&
+             request.resource.data.amount is number && request.resource.data.amount > 0 &&
+             request.resource.data.credits is number && request.resource.data.credits > 0 &&
+             request.resource.data.gcashReference is string && request.resource.data.gcashReference.size() > 0 && request.resource.data.gcashReference.size() < 50 &&
+             request.resource.data.status in ['pending', 'verified', 'rejected'] &&
+             request.resource.data.createdAt is timestamp;
+    }
+
+    function isValidPhoto() {
+      return request.resource.data.userId is string && request.resource.data.userId == request.auth.uid &&
+             request.resource.data.imageUrl is string && request.resource.data.imageUrl.size() > 0 && request.resource.data.imageUrl.size() < 1000000 && // Base64 could be large, but let's keep it reasonable
+             (!('prompt' in request.resource.data) || (request.resource.data.prompt is string && request.resource.data.prompt.size() < 2000)) &&
+             request.resource.data.createdAt is timestamp;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    // Global Settings (Everyone reads, Super Admin writes)
+    match /globalSettings/{document=**} {
+      allow read: if true;
+      allow write: if isSuperAdmin();
+    }
+    
+    match /presets/{presetId} {
+      allow read: if true;
+      allow create: if isSuperAdmin() && isValidPreset();
+      allow update: if isSuperAdmin() && isValidPreset();
+      allow delete: if isSuperAdmin();
+    }
+
+    // --- TENANT ISOLATION ---
+    match /resellers/{resellerId} {
+      // Frontend needs to read branding based on subdomain
+      allow read: if true; 
+      
+      // Only super admin can create resellers
+      allow create: if isSuperAdmin() && isValidReseller();
+      
+      // Only the specific reseller or super admin can update billing/settings
+      // Reseller cannot change their own ownerUid or creditsBalance
+      allow update: if (isSuperAdmin() && isValidReseller()) || 
+                       (isResellerOwner(resellerId) && isValidReseller() && areImmutableFieldsUnchanged(['ownerUid', 'creditsBalance']));
+      
+      allow delete: if isSuperAdmin();
+      
+      // Reseller's Custom Presets
+      match /PRESETS/{presetId} {
+        allow read: if true;
+        allow create: if (isSuperAdmin() || isResellerOwner(resellerId)) && isValidPreset();
+        allow update: if (isSuperAdmin() || isResellerOwner(resellerId)) && isValidPreset();
+        allow delete: if isSuperAdmin() || isResellerOwner(resellerId);
+      }
+
+      // Reseller's End-Users
+      match /users/{userId} {
+        // Users read their own data. Resellers can read ALL users in their specific folder.
+        allow read: if isSuperAdmin() || isResellerOwner(resellerId) || (isAuthenticated() && request.auth.uid == userId);
+        
+        // User creation
+        allow create: if isAuthenticated() && request.auth.uid == userId && isValidUser() && 
+                         request.resource.data.credits == 0 && request.resource.data.status == 'verified' &&
+                         request.resource.data.totalCreditPurchased == 0 && request.resource.data.photosGenerated == 0;
+                         
+        // User update
+        allow update: if isSuperAdmin() || 
+                         (isResellerOwner(resellerId) && isValidUser() && areImmutableFieldsUnchanged(['uid', 'email'])) || 
+                         (isAuthenticated() && request.auth.uid == userId && isValidUser() && areImmutableFieldsUnchanged(['uid', 'email', 'credits', 'status', 'totalCreditPurchased', 'photosGenerated']));
+                         
+        allow delete: if isSuperAdmin() || isResellerOwner(resellerId);
+        
+        match /transactions/{txId} {
+          // Users can create a top-up request.
+          allow create: if isAuthenticated() && request.auth.uid == userId && isValidTransaction() && request.resource.data.status == 'pending';
+          
+          // Users can read their own. Resellers can read all.
+          allow read: if isSuperAdmin() || isResellerOwner(resellerId) || (isAuthenticated() && request.auth.uid == userId);
+          
+          // Resellers can update (verify/reject)
+          allow update: if isSuperAdmin() || 
+                           (isResellerOwner(resellerId) && isValidTransaction() && areImmutableFieldsUnchanged(['userId', 'amount', 'credits', 'gcashReference', 'createdAt']));
+                           
+          // Users can delete their own pending transactions? Let's just say no delete for now.
+          allow delete: if isSuperAdmin();
+        }
+        
+        match /gallery/{photoId} {
+          allow read: if isSuperAdmin() || isResellerOwner(resellerId) || (isAuthenticated() && request.auth.uid == userId);
+          // Only the user can create their own photos
+          allow create: if isAuthenticated() && request.auth.uid == userId && isValidPhoto();
+          allow update: if false; // Photos are immutable
+          allow delete: if isSuperAdmin() || isResellerOwner(resellerId) || (isAuthenticated() && request.auth.uid == userId);
+        }
+      }
+    }
+  }
+}
