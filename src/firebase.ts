@@ -13,7 +13,7 @@ export const googleProvider = new GoogleAuthProvider();
 
 // 2. PHOTOBOOTH (Secondary App) Configuration
 const photoboothConfig = {
-  apiKey: "AIzaSyBx6hAr7s3NBJUToVvOaJGp2OZn4s5lXVs",
+  apiKey: "",
   authDomain: "photobooth-fdd10.firebaseapp.com",
   projectId: "photobooth-fdd10",
   storageBucket: "photobooth-fdd10.firebasestorage.app",
